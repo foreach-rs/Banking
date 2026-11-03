@@ -136,6 +136,19 @@ public class RolStatementReaderTests
     }
 
     [Fact]
+    public void An_amount_that_is_not_a_number_refuses_the_whole_file()
+    {
+        // "363,44" in a column that writes "363.44" is not zero. A line booked at zero — in the
+        // credit direction — on a statement that otherwise looks complete is the quiet failure.
+        var read = RolStatementReader.Read(
+            DinarSample.Replace("Potrazuje=\"363.44\"", "Potrazuje=\"363,44\"", StringComparison.Ordinal));
+
+        Assert.Equal(RolStatementKind.Dinar, read.Kind);
+        Assert.Empty(read.Statement.Entries);
+        Assert.Contains("363,44", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_document_type_declaration_is_refused()
     {
         // No Serbian bank export uses a DTD. One in an uploaded file is a broken export at best and

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Xml.Linq;
+using ForEach.Infrastructure.External.Banking.Formats;
 
 namespace ForEach.Infrastructure.External.Banking.Statements;
 
@@ -21,7 +22,8 @@ namespace ForEach.Infrastructure.External.Banking.Statements;
 /// **It never throws.** A file somebody chose by mistake, a truncated download, an export from a
 /// system that is not a bank: each produces <see cref="BankStatement.Empty"/> rather than an
 /// exception, because the caller's honest answer is "this is not a statement" and not a stack
-/// trace on an import screen.
+/// trace on an import screen. A caller that needs to tell "not readable" from "read, and empty"
+/// asks <see cref="TryReadAll"/>, which says which of the two it was.
 ///
 /// **What it deliberately does not do.** It does not decide what a payment means: no contact
 /// matching, no invoice allocation, no currency conversion. Those are the host's decisions and
@@ -50,35 +52,61 @@ public static class Camt053Reader
     public static BankStatement Read(string? xml) =>
         ReadAll(xml).FirstOrDefault() ?? BankStatement.Empty;
 
-    /// <summary>Every statement in the document, in the order the file lists them.</summary>
-    public static IReadOnlyList<BankStatement> ReadAll(string? xml)
+    /// <summary>
+    /// Every statement in the document, in the order the file lists them. None when the file could
+    /// not be read — see <see cref="TryReadAll"/> for a caller that needs to know which.
+    /// </summary>
+    public static IReadOnlyList<BankStatement> ReadAll(string? xml) =>
+        TryReadAll(xml, out var statements) ? statements : [];
+
+    /// <summary>
+    /// Every statement in the document, saying whether the document could be read at all.
+    ///
+    /// False is "this is not a camt file we can read": not XML, a truncated download, a DTD, or an
+    /// entry whose amount is not a number. True with no statements is a document that parsed and
+    /// held none. The two look identical from <see cref="ReadAll"/>, and a host that cannot tell
+    /// them apart reports a broken download as a quiet day at the bank.
+    /// </summary>
+    public static bool TryReadAll(string? xml, out IReadOnlyList<BankStatement> statements)
     {
-        if (string.IsNullOrWhiteSpace(xml)) return [];
+        statements = [];
 
-        XDocument document;
+        // Loaded with the DTD prohibited, like every other XML reader here: a statement is a file
+        // uploaded from a machine we do not control, and an entity declaration in one is at best
+        // a broken export. Null is "not XML" — a PDF somebody renamed, a truncated download — and
+        // "not a statement" is the answer, which is the caller's to report.
+        var root = SafeXml.Load(xml)?.Root;
 
-        try
+        if (root is null) return false;
+
+        var read = new List<BankStatement>();
+
+        foreach (var element in Elements(root, "Stmt"))
         {
-            document = XDocument.Parse(xml);
-        }
-        catch (System.Xml.XmlException)
-        {
-            // Not XML at all — a PDF somebody renamed, a truncated download. "Not a statement" is
-            // the answer, and it is the caller's to report.
-            return [];
+            // One unreadable entry refuses the file. The alternative is a line booked at zero, in
+            // the credit direction, on a statement that still looks complete.
+            if (ReadStatement(element) is not { } statement) return false;
+
+            read.Add(statement);
         }
 
-        if (document.Root is null) return [];
+        statements = read;
 
-        return
-        [
-            .. Elements(document.Root, "Stmt").Select(ReadStatement)
-        ];
+        return true;
     }
 
-    private static BankStatement ReadStatement(XElement statement)
+    private static BankStatement? ReadStatement(XElement statement)
     {
         var account = Element(statement, "Acct");
+
+        var entries = new List<StatementEntry>();
+
+        foreach (var element in Elements(statement, "Ntry"))
+        {
+            if (ReadEntry(element) is not { } entry) return null;
+
+            entries.Add(entry);
+        }
 
         return new BankStatement(
             AccountNumber: AccountNumberOf(account),
@@ -98,29 +126,44 @@ public static class Camt053Reader
                            ?? DateIn(Element(statement, "FrToDt"), "ToDtTm"),
             OpeningBalance: BalanceOf(statement, OpeningBalanceCode),
             ClosingBalance: BalanceOf(statement, ClosingBalanceCode),
-            Entries: [.. Elements(statement, "Ntry").Select(ReadEntry)]);
+            Entries: entries);
     }
 
-    private static StatementEntry ReadEntry(XElement entry)
+    /// <summary>One entry, or null when its amount is not a number this reader can vouch for.</summary>
+    private static StatementEntry? ReadEntry(XElement entry)
     {
+        // Absent is refused along with unreadable: an entry is a movement, and a movement with no
+        // amount is not one this reader can book — least of all at zero.
+        if (Decimal(Element(entry, "Amt")) is not { } amount) return null;
+
+        var isCredit = string.Equals(
+            Value(entry, "CdtDbtInd"), CreditIndicator, StringComparison.OrdinalIgnoreCase);
+
         // The transaction detail, where the payer and the reference actually live. Absent on a bank
         // charge and on some aggregated entries, which is why every read below tolerates it being
         // null rather than assuming the shape.
         var details = Element(Element(entry, "NtryDtls"), "TxDtls");
 
-        var counterparty = Element(Element(details, "RltdPties"), "Dbtr")
-                           ?? Element(Element(details, "RltdPties"), "Cdtr");
+        var parties = Element(details, "RltdPties");
 
-        var counterpartyAccount = Element(Element(details, "RltdPties"), "DbtrAcct")
-                                  ?? Element(Element(details, "RltdPties"), "CdtrAcct");
+        // The counterparty is whoever is on the other side of the direction: the debtor when money
+        // came in, the creditor when it went out. A bank that names both parties on a debit —
+        // us as Dbtr, the supplier as Cdtr — would otherwise have our own account read back as
+        // the counterparty of every payment we make. The other side is a fallback only, for a
+        // file that names one party and not the one the direction asks for.
+        var counterparty = isCredit
+            ? Element(parties, "Dbtr") ?? Element(parties, "Cdtr")
+            : Element(parties, "Cdtr") ?? Element(parties, "Dbtr");
+
+        var counterpartyAccount = isCredit
+            ? Element(parties, "DbtrAcct") ?? Element(parties, "CdtrAcct")
+            : Element(parties, "CdtrAcct") ?? Element(parties, "DbtrAcct");
 
         return new StatementEntry(
             // Absolute, because the direction carries the sign. A file that ever wrote a negative
             // amount beside a DBIT indicator would otherwise be counted twice over.
-            Amount: Math.Abs(Decimal(Element(entry, "Amt")) ?? 0m),
-            Direction: string.Equals(Value(entry, "CdtDbtInd"), CreditIndicator, StringComparison.OrdinalIgnoreCase)
-                ? StatementDirection.Credit
-                : StatementDirection.Debit,
+            Amount: Math.Abs(amount),
+            Direction: isCredit ? StatementDirection.Credit : StatementDirection.Debit,
 
             // The booking date is the statement's own date for the entry. Falling back to the
             // value date rather than to today: an entry with no booking date belongs to the day

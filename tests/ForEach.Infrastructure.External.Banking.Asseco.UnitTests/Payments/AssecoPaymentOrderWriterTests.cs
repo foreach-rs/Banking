@@ -97,6 +97,40 @@ public class AssecoPaymentOrderWriterTests
     }
 
     [Fact]
+    public void The_declaration_says_utf8_because_that_is_what_the_bytes_are()
+    {
+        // A writer handed a StringBuilder declares utf-16 — the encoding of the string — while
+        // Bytes() produces UTF-8. A declaration that contradicts the bytes is a file a strict
+        // parser refuses on its first line.
+        var file = AssecoPaymentOrderWriter.Write(Order());
+
+        Assert.StartsWith(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>", file.Content!, StringComparison.Ordinal);
+
+        var bytes = AssecoPaymentOrderWriter.Bytes(file);
+
+        Assert.Equal((byte)'<', bytes[0]);
+        Assert.NotEqual(0xEF, bytes[0]);
+        Assert.NotEqual(0xBB, bytes[1]);
+    }
+
+    [Fact]
+    public void A_control_character_in_a_field_is_refused_by_name_rather_than_thrown()
+    {
+        // The XML writer throws on U+0001 rather than escaping it, and a line break inside a
+        // purpose is one the bank's confirmation prints as two.
+        var broken = AssecoPaymentOrderWriter.Write(Order() with { Purpose = "Plaćanje\r\nfakture" });
+
+        Assert.False(broken.Written);
+        Assert.Contains(broken.Refusals, r => r.Contains("Svrha plaćanja", StringComparison.Ordinal));
+
+        var control = AssecoPaymentOrderWriter.Write(Order() with { BeneficiaryName = "ALFA\u0001DOO" });
+
+        Assert.False(control.Written);
+        Assert.Contains(control.Refusals, r => r.Contains("Naziv korisnika", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void An_account_that_is_not_eighteen_digits_is_refused()
     {
         var file = AssecoPaymentOrderWriter.Write(Order() with { BeneficiaryAccount = "330-11" });

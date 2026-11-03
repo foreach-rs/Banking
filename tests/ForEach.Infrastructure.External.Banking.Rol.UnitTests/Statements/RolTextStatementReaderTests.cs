@@ -125,6 +125,33 @@ public class RolTextStatementReaderTests
     }
 
     [Fact]
+    public void A_line_with_no_readable_date_refuses_the_file_rather_than_defaulting()
+    {
+        // The line's own date, then the header's. With neither readable there is no day to file
+        // the movement under, and the first of January 0001 is not one.
+        var lines = Sample.Split("\r\n");
+
+        lines[0] = lines[0].Remove(1, 8).Insert(1, "99/99/99");
+        lines[1] = lines[1].Remove(25, 8).Insert(25, "99/99/99");
+
+        var read = RolTextStatementReader.Read(string.Join("\r\n", lines));
+
+        Assert.Equal(RolStatementKind.Dinar, read.Kind);
+        Assert.Empty(read.Statement.Entries);
+        Assert.Contains("99/99/99", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_amount_that_is_not_a_number_refuses_the_whole_file()
+    {
+        var read = RolTextStatementReader.Read(
+            Sample.Replace(" 00000000000000000363.44", " 0000000000000000036x.44", StringComparison.Ordinal));
+
+        Assert.Empty(read.Statement.Entries);
+        Assert.Contains("36x.44", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_line_longer_than_the_record_is_refused_rather_than_read_from_the_wrong_offsets()
     {
         Assert.Equal(RolStatementKind.Unknown, RolTextStatementReader.Read(Sample + "X").Kind);

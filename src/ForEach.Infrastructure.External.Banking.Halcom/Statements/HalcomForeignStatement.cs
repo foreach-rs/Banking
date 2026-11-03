@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using ForEach.Infrastructure.External.Banking.Formats;
 using ForEach.Infrastructure.External.Banking.Statements;
 
@@ -28,6 +27,12 @@ namespace ForEach.Infrastructure.External.Banking.Halcom.Statements;
 /// Importing the movements that could be resolved and reporting success is how a payment goes
 /// missing, and this is a format nobody has verified against a second sample.
 ///
+/// **The tags are scanned, not matched by a pattern.** The file is XML-shaped without being XML —
+/// no root, no declaration — and a regular expression with a lazy body and a backreference is
+/// quadratic on a file that never closes its tags: half a megabyte of <c>&lt;KONTO&gt;</c> openers
+/// timed out rather than answering. A linear scan reads the same records from a well-formed file
+/// and answers "no movements" to the pathological one in milliseconds.
+///
 /// **What is deliberately not read**: the poziv na broj. <c>OZK</c> carries free text that in this
 /// sample happens to hold a SWIFT-style <c>/INV/</c> reference, and pulling an invoice number out
 /// of it on one example would hand the matcher a value to match invoices against. A null reference
@@ -39,33 +44,13 @@ public static class HalcomForeignStatement
     /// <summary>The marker that opens one of these files.</summary>
     internal const string Marker = "<CLIENTPROFILE>";
 
-    private static readonly Regex RecordPattern = new(
-        @"<(?<tag>CLIENTPROFILE|KONTO|PPTPROMET)>(?<body>.*?)</\k<tag>>",
-        RegexOptions.Singleline | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture,
-        TimeSpan.FromSeconds(2));
-
-    private static readonly Regex FieldPattern = new(
-        @"<(?<name>[A-Za-z_][A-Za-z0-9_]*)>(?<value>.*?)</\k<name>>",
-        RegexOptions.Singleline | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture,
-        TimeSpan.FromSeconds(2));
+    /// <summary>The three record kinds this reader knows. Anything else is skipped.</summary>
+    private static readonly HashSet<string> RecordTags =
+        new(StringComparer.Ordinal) { "CLIENTPROFILE", "KONTO", "PPTPROMET" };
 
     internal static HalcomStatementRead Read(string content)
     {
-        var records = new List<(string Tag, Dictionary<string, string> Fields)>();
-
-        foreach (Match record in RecordPattern.Matches(content))
-        {
-            var fields = new Dictionary<string, string>(StringComparer.Ordinal);
-
-            foreach (Match field in FieldPattern.Matches(record.Groups["body"].Value))
-            {
-                var value = field.Groups["value"].Value.Trim();
-
-                if (value.Length > 0) fields[field.Groups["name"].Value] = value;
-            }
-
-            records.Add((record.Groups["tag"].Value, fields));
-        }
+        var records = Records(content);
 
         var movements = records.Where(r => r.Tag is "PPTPROMET").Select(r => r.Fields).ToList();
         var balances = records.Where(r => r.Tag is "KONTO").Select(r => r.Fields).ToList();
@@ -86,6 +71,26 @@ public static class HalcomForeignStatement
         {
             if (balance.GetValueOrDefault("K_GI") is { Length: > 0 } key)
                 byGroup.TryAdd(key, balance);
+        }
+
+        // One balance record describes one movement. Two movements sharing a KONTO have one
+        // before/after pair between them, and a pair says which way the *net* went — not which
+        // way each of them did. Booking both with the net direction is a payment out recorded as
+        // money in, so a shared group refuses the file; see below.
+        var sharing = movements
+            .Select(movement => movement.GetValueOrDefault("P_GI"))
+            .Where(group => !string.IsNullOrEmpty(group))
+            .GroupBy(group => group, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key!)
+            .ToList();
+
+        if (sharing.Count > 0)
+        {
+            return new HalcomStatementRead(
+                HalcomStatementKind.ForeignStatement, [],
+                "Više stavki deviznog izvoda deli isti KONTO zapis (" + string.Join(", ", sharing)
+                + "), pa se smer knjiženja pojedinačne stavke ne može utvrditi. Izvod se ne uvozi.");
         }
 
         var entries = new List<StatementEntry>();
@@ -157,5 +162,154 @@ public static class HalcomForeignStatement
             Entries: entries);
 
         return new HalcomStatementRead(HalcomStatementKind.ForeignStatement, [statement]);
+    }
+
+    // ---- the scan ------------------------------------------------------------------------------
+
+    /// <summary>One tag in the text: its name, whether it closes, and where it starts and ends.</summary>
+    private readonly record struct Tag(string Name, bool Closing, int Start, int End);
+
+    /// <summary>
+    /// The records in file order, each with its fields.
+    ///
+    /// A record is a known opening tag and the first closing tag of the same name after it — the
+    /// same reading a lazy pattern would give — and an opening tag that is never closed is skipped
+    /// rather than searched for again from every later position. The tags are listed once and the
+    /// closers looked up by name, which is what keeps a file of nothing but openers linear.
+    /// </summary>
+    private static List<(string Tag, Dictionary<string, string> Fields)> Records(string content)
+    {
+        var tags = Tags(content);
+        var closers = Closers(tags);
+
+        var records = new List<(string Tag, Dictionary<string, string> Fields)>();
+
+        for (var index = 0; index < tags.Count; index++)
+        {
+            var tag = tags[index];
+
+            if (tag.Closing || !RecordTags.Contains(tag.Name)) continue;
+
+            var close = NextCloser(closers, tag.Name, index);
+
+            if (close < 0) continue;
+
+            records.Add((tag.Name, Fields(content, tags, index + 1, close)));
+
+            // Everything up to the closer belongs to this record, so the scan resumes after it.
+            index = close;
+        }
+
+        return records;
+    }
+
+    /// <summary>
+    /// The fields between two tag positions: every opening tag paired with the first closer of the
+    /// same name before the record ends, its value trimmed, and blank values left out — a present
+    /// but empty element says nothing.
+    /// </summary>
+    private static Dictionary<string, string> Fields(string content, List<Tag> tags, int from, int to)
+    {
+        var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        var closers = Closers(tags, from, to);
+
+        for (var index = from; index < to; index++)
+        {
+            var tag = tags[index];
+
+            if (tag.Closing) continue;
+
+            var close = NextCloser(closers, tag.Name, index);
+
+            if (close < 0) continue;
+
+            var value = content[tag.End..tags[close].Start].Trim();
+
+            if (value.Length > 0) fields[tag.Name] = value;
+
+            index = close;
+        }
+
+        return fields;
+    }
+
+    /// <summary>
+    /// Every tag in the text, in order. A tag is <c>&lt;</c>, an optional <c>/</c>, a name of
+    /// letters, digits and underscores, then <c>&gt;</c>; a <c>&lt;</c> that is not one is text.
+    /// </summary>
+    private static List<Tag> Tags(string content)
+    {
+        var tags = new List<Tag>();
+
+        var at = 0;
+
+        while ((at = content.IndexOf('<', at)) >= 0)
+        {
+            var cursor = at + 1;
+
+            var closing = cursor < content.Length && content[cursor] == '/';
+
+            if (closing) cursor++;
+
+            var nameStart = cursor;
+
+            while (cursor < content.Length && IsNameCharacter(content[cursor], cursor == nameStart))
+                cursor++;
+
+            if (cursor > nameStart && cursor < content.Length && content[cursor] == '>')
+            {
+                tags.Add(new Tag(content[nameStart..cursor], closing, at, cursor + 1));
+
+                at = cursor + 1;
+            }
+            else
+            {
+                at++;
+            }
+        }
+
+        return tags;
+
+        static bool IsNameCharacter(char c, bool first) =>
+            char.IsAsciiLetter(c) || c == '_' || (!first && char.IsAsciiDigit(c));
+    }
+
+    /// <summary>The positions of the closing tags, by name, in order — over the whole list.</summary>
+    private static Dictionary<string, List<int>> Closers(List<Tag> tags) =>
+        Closers(tags, 0, tags.Count);
+
+    /// <summary>The positions of the closing tags, by name, in order, within a range.</summary>
+    private static Dictionary<string, List<int>> Closers(List<Tag> tags, int from, int to)
+    {
+        var closers = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+
+        for (var index = from; index < to; index++)
+        {
+            if (!tags[index].Closing) continue;
+
+            if (!closers.TryGetValue(tags[index].Name, out var positions))
+                closers[tags[index].Name] = positions = [];
+
+            positions.Add(index);
+        }
+
+        return closers;
+    }
+
+    /// <summary>
+    /// The first closing tag of this name after a position, or −1. A binary search over the
+    /// positions listed once, so finding every record's end costs the file a logarithm each rather
+    /// than a scan each.
+    /// </summary>
+    private static int NextCloser(Dictionary<string, List<int>> closers, string name, int after)
+    {
+        if (!closers.TryGetValue(name, out var positions)) return -1;
+
+        var found = positions.BinarySearch(after + 1);
+
+        if (found < 0) found = ~found;
+
+        return found < positions.Count ? positions[found] : -1;
     }
 }

@@ -131,6 +131,32 @@ public class HalcomPaymentOrderWriterTests
     }
 
     [Fact]
+    public void A_line_break_inside_a_field_is_refused_rather_than_written_as_a_fourth_record()
+    {
+        // A purpose with a line break in it ends the order record there and starts another with
+        // the rest, so the bank reads four records where the summary promised three.
+        var file = HalcomPaymentOrderWriter.Write([Orders[0] with { Purpose = "Plaćanje\r\nfakture" }]);
+
+        Assert.False(file.Written);
+        Assert.Contains(file.Refusals, r => r.Contains("Svrha plaćanja", StringComparison.Ordinal));
+
+        // And the same order without it is the three records it should be.
+        var clean = HalcomPaymentOrderWriter.Write([Orders[0]]).Content!;
+
+        Assert.Equal(3, clean.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Length);
+    }
+
+    [Fact]
+    public void A_control_character_in_a_field_is_refused_by_name()
+    {
+        var file = HalcomPaymentOrderWriter.Write(
+            [Orders[0] with { BeneficiaryName = "KNJIGOVODSTVO\u0001DOO" }]);
+
+        Assert.False(file.Written);
+        Assert.Contains(file.Refusals, r => r.Contains("Naziv korisnika", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Orders_drawn_on_two_different_accounts_are_refused()
     {
         // The header states the account every order is drawn on, so a second one would be paid

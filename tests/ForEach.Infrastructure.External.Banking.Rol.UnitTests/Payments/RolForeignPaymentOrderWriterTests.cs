@@ -321,6 +321,20 @@ public class RolForeignPaymentOrderWriterTests
     }
 
     [Fact]
+    public void A_control_character_in_a_field_is_refused_by_name_rather_than_thrown()
+    {
+        var broken = RolForeignPaymentOrderWriter.Write(Order() with { Details = "Plaćanje\r\nfakture" });
+
+        Assert.False(broken.Written);
+        Assert.Contains(broken.Refusals, r => r.Contains("Detalji plaćanja", StringComparison.Ordinal));
+
+        var control = RolForeignPaymentOrderWriter.Write(Order() with { BeneficiaryName = "ADRIA\u0001DD" });
+
+        Assert.False(control.Written);
+        Assert.Contains(control.Refusals, r => r.Contains("Naziv korisnika", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_special_mark_outside_one_to_seven_is_refused()
     {
         Assert.False(RolForeignPaymentOrderWriter.Write(Order() with { SpecialMark = 8 }).Written);

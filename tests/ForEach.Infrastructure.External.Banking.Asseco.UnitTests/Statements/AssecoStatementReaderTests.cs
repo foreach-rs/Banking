@@ -186,6 +186,41 @@ public class AssecoStatementReaderTests
     }
 
     [Fact]
+    public void An_amount_that_is_not_a_number_refuses_the_whole_file()
+    {
+        // The alternative is a line booked at zero on a statement that still looks complete.
+        var read = AssecoStatementReader.Read(
+            Sample.Replace("<trnamt>120000.00</trnamt>", "<trnamt>abc</trnamt>", StringComparison.Ordinal));
+
+        Assert.Equal(AssecoStatementKind.Statement, read.Kind);
+        Assert.Empty(read.Statements);
+        Assert.Contains("abc", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_direction_that_is_neither_credit_nor_debit_refuses_the_file_rather_than_reading_as_debit()
+    {
+        var read = AssecoStatementReader.Read(
+            Sample.Replace("<benefit>credit</benefit>", "<benefit>kredit</benefit>", StringComparison.Ordinal));
+
+        Assert.Empty(read.Statements);
+        Assert.Contains("kredit", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_line_whose_date_does_not_parse_refuses_the_file_rather_than_defaulting()
+    {
+        // A default DateOnly is the first of January 0001 — a date no statement line can carry.
+        var read = AssecoStatementReader.Read(
+            Sample
+                .Replace("<dtposted>2026-04-16T00:00:00</dtposted>", "<dtposted>juče</dtposted>", StringComparison.Ordinal)
+                .Replace("<dtavail>2026-04-16T00:00:00</dtavail>", "<dtavail>juče</dtavail>", StringComparison.Ordinal));
+
+        Assert.Empty(read.Statements);
+        Assert.Contains("datum", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void The_intraday_message_has_no_statement_number_and_that_is_not_an_error()
     {
         // The specification says stmtnumber is "uvek prazno" on the daily message. Null rather

@@ -73,10 +73,32 @@ public static class AssecoTextStatementReader
         // a sample of.
         if (header is null) return NotRecognised;
 
-        var entries = lines
-            .Where(line => line[^1] is DetailKind)
-            .Select(ReadEntry)
-            .ToList();
+        var details = lines.Where(line => line[^1] is DetailKind).ToList();
+
+        // Every movement's amount and date are read before any line is. A figure that is not
+        // thirteen digits, or a date that is not one, refuses the file: the alternative is a line
+        // booked at zero, or on the first of January 0001, on a statement that otherwise passes
+        // the header check below.
+        var entries = new List<StatementEntry>(details.Count);
+
+        foreach (var line in details)
+        {
+            if (BankValues.ImpliedDecimal(Field(line, 134, 13)) is not { } amount)
+            {
+                return new AssecoStatementRead(
+                    AssecoStatementKind.Statement, [],
+                    $"Iznos „{Field(line, 134, 13)}” nije čitljiv. Izvod se ne uvozi.");
+            }
+
+            if (BankValues.Date(Field(line, 188, 8), DateFormat) is not { } date)
+            {
+                return new AssecoStatementRead(
+                    AssecoStatementKind.Statement, [],
+                    $"Datum „{Field(line, 188, 8)}” nije čitljiv. Izvod se ne uvozi.");
+            }
+
+            entries.Add(ReadEntry(line, amount, date));
+        }
 
         var statedDebit = Signed(Field(header, 51, 18)) ?? 0m;
         var statedCredit = Signed(Field(header, 69, 18)) ?? 0m;
@@ -117,20 +139,23 @@ public static class AssecoTextStatementReader
     public static bool Recognises(string? content) =>
         Read(content) is { Kind: not AssecoStatementKind.Unknown, Refusal: null };
 
-    private static StatementEntry ReadEntry(string line)
+    /// <summary>
+    /// One movement. The amount — thirteen characters, eleven whole and two decimal, with no
+    /// separator between them — and the date arrive already read, because a line either of them
+    /// fails on refuses the file before this is reached.
+    /// </summary>
+    private static StatementEntry ReadEntry(string line, decimal amount, DateOnly date)
     {
         var debitReference = Field(line, 76, 20);
         var creditReference = Field(line, 168, 20);
 
         return new StatementEntry(
-            // Thirteen characters, eleven whole and two decimal, with no separator between them.
-            // A reader that forgot to divide would be out by a factor of a hundred.
-            Amount: BankValues.ImpliedDecimal(Field(line, 134, 13)) ?? 0m,
+            Amount: amount,
 
             // Stated rather than derived: D is duguje and P is potražuje.
             Direction: line[147] is DebitMark ? StatementDirection.Debit : StatementDirection.Credit,
-            BookingDate: BankValues.Date(Field(line, 188, 8), DateFormat) ?? default,
-            ValueDate: BankValues.Date(Field(line, 188, 8), DateFormat),
+            BookingDate: date,
+            ValueDate: date,
 
             // The beneficiary's reference first — the same rule every reader in this solution
             // follows. Here the second pair is the unqualified "poziv na broj", which on a
@@ -174,13 +199,15 @@ public static class AssecoTextStatementReader
     ///
     /// The specification says the field carries a sign without saying which end it sits at, so
     /// both are accepted. An unsigned figure is positive, which is what an unused sign column
-    /// means.
+    /// means. A blank field is null rather than zero: zero would claim the account was empty, and
+    /// <see cref="BankStatement.Reconciles"/> would then report a fault nobody can find instead of
+    /// saying nothing.
     /// </summary>
     private static decimal? Signed(string? field)
     {
         var text = field?.Trim();
 
-        if (string.IsNullOrEmpty(text)) return 0m;
+        if (string.IsNullOrEmpty(text)) return null;
 
         var negative = text[0] is '-' || text[^1] is '-';
 

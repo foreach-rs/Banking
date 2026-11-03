@@ -36,9 +36,10 @@ public enum AssecoStatementKind
 /// when nothing was read.
 /// </param>
 /// <param name="Refusal">
-/// Why a recognised file was not read, in Serbian, when
-/// <see cref="AssecoStatementRead.Kind"/> is <see cref="AssecoStatementKind.BankError"/>. Null
-/// otherwise.
+/// Why a recognised file was not read, in Serbian: the bank's own error when
+/// <see cref="AssecoStatementRead.Kind"/> is <see cref="AssecoStatementKind.BankError"/>, or a
+/// line this reader could not vouch for — an amount that is not a number, a direction that is
+/// neither credit nor debit, a date that does not parse. Null when the file was read.
 /// </param>
 public sealed record AssecoStatementRead(
     AssecoStatementKind Kind,
@@ -87,6 +88,9 @@ public static class AssecoStatementReader
     /// <summary>Money in, as the <c>benefit</c> element writes it.</summary>
     private const string CreditIndicator = "credit";
 
+    /// <summary>Money out — the only other thing <c>benefit</c> may say.</summary>
+    private const string DebitIndicator = "debit";
+
     /// <summary>
     /// The document-type prefix that marks a devizni statement — <c>ibank.fps.</c>, the foreign
     /// payment system. It is the only thing that tells the two documents apart before reading them.
@@ -133,13 +137,7 @@ public static class AssecoStatementReader
 
         if (RefusalFor(root) is { } single) return single;
 
-        var kind = IsForeign(root)
-            ? AssecoStatementKind.ForeignStatement
-            : rootName is NotificationRoot
-                ? AssecoStatementKind.Notification
-                : AssecoStatementKind.Statement;
-
-        return new AssecoStatementRead(kind, [ReadStatement(root)]);
+        return new AssecoStatementRead(KindOf(root), [ReadStatement(root)]);
     }
 
     private static bool IsForeign(XElement document) =>
@@ -148,22 +146,66 @@ public static class AssecoStatementReader
     private static string DocumentTypeOf(XElement document) =>
         Value(document, "rstype") ?? Value(document, "notiftype") ?? string.Empty;
 
-    /// <summary>The one reason a recognised document is not read: the bank saying no.</summary>
+    private static AssecoStatementKind KindOf(XElement document) =>
+        IsForeign(document)
+            ? AssecoStatementKind.ForeignStatement
+            : document.Name.LocalName.ToLowerInvariant() is NotificationRoot
+                ? AssecoStatementKind.Notification
+                : AssecoStatementKind.Statement;
+
+    /// <summary>
+    /// Why a recognised document is not read: the bank saying no, or a line this reader cannot
+    /// vouch for.
+    ///
+    /// The lines are checked before any is read because the alternative is quiet: an amount that
+    /// does not parse used to book as zero, a direction that was neither credit nor debit as a
+    /// debit, a date that did not parse as the first of January 0001 — each on a statement that
+    /// still looked complete. The file is refused whole, naming the value, so the person at the
+    /// import screen can see what the bank wrote.
+    /// </summary>
     private static AssecoStatementRead? RefusalFor(XElement document)
     {
         var status = Value(Child(document, "status"), "code");
 
         // Absent is fine — some exports carry no status block at all. Present and non-zero is the
         // bank telling us this is an error document that happens to have a statement's root.
-        if (status is null || status == "0") return null;
+        if (status is not null && status != "0")
+        {
+            var detail = Value(Child(document, "status"), "detail");
 
-        var detail = Value(Child(document, "status"), "detail");
+            return new AssecoStatementRead(
+                AssecoStatementKind.BankError, [],
+                $"Banka je vratila grešku {status}"
+                + (string.IsNullOrWhiteSpace(detail) ? "." : $": {detail}"));
+        }
 
-        return new AssecoStatementRead(
-            AssecoStatementKind.BankError, [],
-            $"Banka je vratila grešku {status}"
-            + (string.IsNullOrWhiteSpace(detail) ? "." : $": {detail}"));
+        foreach (var transaction in Transactions(document))
+        {
+            if (Value(transaction, "trnamt") is { } amount && BankValues.Amount(amount) is null)
+                return Refused(document, $"Iznos „{amount}” nije čitljiv. Izvod se ne uvozi.");
+
+            var benefit = Value(transaction, "benefit");
+
+            if (!IsCreditOrDebit(benefit))
+            {
+                return Refused(
+                    document,
+                    $"Smer knjiženja „{benefit}” nije ni „credit” ni „debit”. Izvod se ne uvozi.");
+            }
+
+            if (BookingDateOf(transaction) is null)
+            {
+                return Refused(
+                    document,
+                    "Stavka nema čitljiv datum knjiženja (dtposted ili dtavail). Izvod se ne uvozi.");
+            }
+        }
+
+        return null;
     }
+
+    private static AssecoStatementRead Refused(XElement document, string reason) =>
+        new(KindOf(document), [], reason);
 
     private static BankStatement ReadStatement(XElement document) =>
         IsForeign(document) ? ReadForeign(document) : ReadDomestic(document);
@@ -196,12 +238,13 @@ public static class AssecoStatementReader
         return new StatementEntry(
             // Absolute in the file — "iznos se daje u apsolutnom iznosu" — with the direction
             // carried by benefit. Abs anyway, so a file that ever wrote a negative beside a debit
-            // cannot be counted twice over.
+            // cannot be counted twice over. Unreadable was refused in RefusalFor; absent is a line
+            // that moved nothing.
             Amount: Math.Abs(BankValues.Amount(Value(transaction, "trnamt")) ?? 0m),
             Direction: isCredit ? StatementDirection.Credit : StatementDirection.Debit,
-            BookingDate: BankValues.Date(Value(transaction, "dtposted"))
-                         ?? BankValues.Date(Value(transaction, "dtavail"))
-                         ?? default,
+
+            // Checked in RefusalFor, so the fallback is never taken; it is here for the type.
+            BookingDate: BookingDateOf(transaction) ?? default,
             ValueDate: BankValues.Date(Value(transaction, "dtavail")),
             Reference: DomesticReferenceOf(transaction, isCredit),
             Description: DomesticDescriptionOf(transaction),
@@ -312,11 +355,10 @@ public static class AssecoStatementReader
             Add(parts, $"Dinarska protivvrednost: {local}");
 
         return new StatementEntry(
+            // Unreadable was refused in RefusalFor; absent is a line that moved nothing.
             Amount: Math.Abs(BankValues.Amount(Value(transaction, "trnamt")) ?? 0m),
             Direction: IsCredit(transaction) ? StatementDirection.Credit : StatementDirection.Debit,
-            BookingDate: BankValues.Date(Value(transaction, "dtposted"))
-                         ?? BankValues.Date(Value(transaction, "dtavail"))
-                         ?? default,
+            BookingDate: BookingDateOf(transaction) ?? default,
             ValueDate: BankValues.Date(Value(transaction, "dtavail")),
 
             // A devizni line has one reference and it is not split by direction, so there is no
@@ -363,6 +405,24 @@ public static class AssecoStatementReader
     private static bool IsCredit(XElement transaction) =>
         string.Equals(
             Value(transaction, "benefit"), CreditIndicator, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether <c>benefit</c> says one of the two things it can say. Anything else — a misspelling,
+    /// a blank, a value from a newer specification — is refused rather than read as a debit, which
+    /// is what "not credit" used to mean here.
+    /// </summary>
+    private static bool IsCreditOrDebit(string? benefit) =>
+        string.Equals(benefit, CreditIndicator, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(benefit, DebitIndicator, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The day the line was booked, from <c>dtposted</c>, or from <c>dtavail</c> where the bank
+    /// states only the value date. Null where neither reads, which refuses the file: an entry with
+    /// no date belongs to no statement.
+    /// </summary>
+    private static DateOnly? BookingDateOf(XElement transaction) =>
+        BankValues.Date(Value(transaction, "dtposted"))
+        ?? BankValues.Date(Value(transaction, "dtavail"));
 
     /// <summary>
     /// The statement's transactions.

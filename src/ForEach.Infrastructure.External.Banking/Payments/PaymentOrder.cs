@@ -19,7 +19,7 @@ public enum PaymentPriority
 /// each bank project turns it into that bank's file.
 ///
 /// **This is not the host's virman entity.** It carries no identity, no status and no link to an
-/// invoice — a payment order in a file is a instruction, and the record of having decided to send
+/// invoice — a payment order in a file is an instruction, and the record of having decided to send
 /// it belongs to whoever is keeping the books. Putting a database key on this record would make the
 /// library know about the host, which is the dependency the seam exists to prevent.
 /// </summary>

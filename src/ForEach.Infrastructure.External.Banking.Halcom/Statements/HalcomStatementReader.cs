@@ -161,7 +161,25 @@ public static class HalcomStatementReader
             padded.Add(whole);
         }
 
-        var entries = padded.Select(ReadFixedWidthEntry).ToList();
+        // Every amount is read before any line is: a figure that is not fifteen digits refuses the
+        // file, because the alternative is a line booked at zero — in the credit direction — on a
+        // statement that otherwise looks complete.
+        var amounts = new List<decimal>(padded.Count);
+
+        for (var i = 0; i < padded.Count; i++)
+        {
+            if (BankValues.ImpliedDecimal(padded[i].Substring(90, 15)) is not { } amount)
+            {
+                return new HalcomStatementRead(
+                    HalcomStatementKind.FixedWidth, [],
+                    $"Iznos „{padded[i].Substring(90, 15).Trim()}” u {i + 1}. redu nije čitljiv. "
+                    + "Izvod se ne uvozi.");
+            }
+
+            amounts.Add(amount);
+        }
+
+        var entries = padded.Select((line, i) => ReadFixedWidthEntry(line, amounts[i])).ToList();
 
         var ownAccounts = padded.Select(line => Field(line, 72, 18)).Distinct().ToList();
 
@@ -216,10 +234,10 @@ public static class HalcomStatementReader
         && line[22] is '.'
         && line[25] is '.';
 
-    private static StatementEntry ReadFixedWidthEntry(string line)
+    private static StatementEntry ReadFixedWidthEntry(string line, decimal amount)
     {
         var posting = line.Substring(18, 2);
-        var signed = (BankValues.ImpliedDecimal(line.Substring(90, 15)) ?? 0m) * PostingSign[posting];
+        var signed = amount * PostingSign[posting];
 
         var debitReference = Field(line, 113, 22);
         var creditReference = Field(line, 137, 22);
@@ -363,9 +381,24 @@ public static class HalcomStatementReader
                 order.Add(key);
             }
 
-            var debit = BankValues.DisplayAmount(Column(row, "ZNESEK_V_BREME")) ?? 0m;
-            var credit = BankValues.DisplayAmount(Column(row, "ZNESEK_V_DOBRO")) ?? 0m;
-            var net = credit - debit;
+            // A blank column is the unused side of the line and reads as zero. A filled one that
+            // is not an amount in display form — "1234.50", "1 234,50" — refuses the file rather
+            // than reading as zero or, worse, as a hundred times itself.
+            var debitText = Column(row, "ZNESEK_V_BREME");
+            var creditText = Column(row, "ZNESEK_V_DOBRO");
+
+            var debit = debitText is null ? 0m : BankValues.DisplayAmount(debitText);
+            var credit = creditText is null ? 0m : BankValues.DisplayAmount(creditText);
+
+            if (debit is null || credit is null)
+            {
+                return new HalcomStatementRead(
+                    HalcomStatementKind.Extended, [],
+                    $"Iznos „{(debit is null ? debitText : creditText)}” nije čitljiv — očekuje se "
+                    + "oblik 3.000.000,00. Izvod se ne uvozi.");
+            }
+
+            var net = credit.Value - debit.Value;
 
             var paymentCode = Column(row, "OZN_VRSTE_POSLA");
             var orderId = Column(row, "ID_NALOGA");

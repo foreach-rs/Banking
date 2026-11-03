@@ -184,6 +184,55 @@ public class Mt940ReaderTests
         Assert.False(Mt940Reader.Recognises(":20:SOMEREF\r\n:30:060626\r\n"));
     }
 
+    [Fact]
+    public void The_SWIFT_framing_between_messages_does_not_swallow_the_closing_balance()
+    {
+        // "-}" closes block 4 and "{1:…}{4:" opens the next message. Glued onto the field before
+        // them — :62F:, the last one of a message — they made the closing balance unreadable on
+        // exactly the files that carry the framing.
+        var statements = Mt940Reader.ReadAll(Framed(":28C:1/1", ":28C:2/1"));
+
+        Assert.Equal(2, statements.Count);
+        Assert.Equal(900m, statements[0].ClosingBalance);
+        Assert.Equal(950m, statements[1].ClosingBalance);
+        Assert.All(statements, statement => Assert.True(statement.Reconciles));
+    }
+
+    [Fact]
+    public void A_statement_split_over_two_messages_is_read_as_one()
+    {
+        // :28C: is the izvod number and the sequence within it. 1/1 and 1/2 are halves of the
+        // same statement, and a reader returning them separately — with Read() keeping only the
+        // first — loses every entry the second half carries.
+        var statements = Mt940Reader.ReadAll(Framed(":28C:1/1", ":28C:1/2"));
+
+        var statement = Assert.Single(statements);
+
+        Assert.Equal("1", statement.Number);
+        Assert.Equal(2, statement.Entries.Count);
+        Assert.Equal(1_000m, statement.OpeningBalance);
+        Assert.Equal(950m, statement.ClosingBalance);
+        Assert.True(statement.Reconciles);
+
+        Assert.Equal(2, Mt940Reader.Read(Framed(":28C:1/1", ":28C:1/2")).Entries.Count);
+    }
+
+    /// <summary>
+    /// Two messages in full SWIFT framing, on one account: a debit of 100 then a credit of 50,
+    /// each message closing with its own :62F:.
+    /// </summary>
+    private static string Framed(string firstSequence, string secondSequence) =>
+        "{1:F01RZBSRSBGAXXX0000000000}{2:I940RZBSRSBGXXXXN}{4:\r\n"
+        + ":20:A\r\n:25:160000000000000001/RSD\r\n" + firstSequence + "\r\n"
+        + ":60F:C261103RSD1000,00\r\n"
+        + ":61:2611031103D100,00NTRFREF//B1\r\n:86:?20Placanje\r\n"
+        + ":62F:C261103RSD900,00\r\n-}\r\n"
+        + "{1:F01RZBSRSBGAXXX0000000000}{2:I940RZBSRSBGXXXXN}{4:\r\n"
+        + ":20:B\r\n:25:160000000000000001/RSD\r\n" + secondSequence + "\r\n"
+        + ":60M:C261103RSD900,00\r\n"
+        + ":61:2611031103C50,00NTRFREF//B2\r\n"
+        + ":62F:C261103RSD950,00\r\n-}";
+
     /// <summary>
     /// Raiffeisen's published dinar example, trimmed to seven entries. The balances are theirs and
     /// are left alone — they are what proves the reversal rule.

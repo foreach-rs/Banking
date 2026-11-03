@@ -19,9 +19,26 @@ public enum OtpStatementFormat
 /// and both arrive as an empty statement otherwise.
 /// </param>
 /// <param name="Statement">
-/// What was read, or <see cref="BankStatement.Empty"/> when nothing recognised the file.
+/// What was read — the first statement where the file holds several — or
+/// <see cref="BankStatement.Empty"/> when nothing recognised the file.
 /// </param>
-public sealed record OtpStatementRead(OtpStatementFormat Format, BankStatement Statement);
+public sealed record OtpStatementRead(OtpStatementFormat Format, BankStatement Statement)
+{
+    /// <summary>
+    /// Every statement in the file, with the one <see cref="Statement"/> keeps as the first.
+    ///
+    /// A camt file can carry a week of izvodi at once, and a host reading only the first would
+    /// import one day and report success over the other four. Empty when nothing was read.
+    /// </summary>
+    public IReadOnlyList<BankStatement> Statements { get; init; } = [Statement];
+
+    /// <summary>A read of several statements, with the first one standing as <see cref="Statement"/>.</summary>
+    public OtpStatementRead(OtpStatementFormat format, IReadOnlyList<BankStatement> statements)
+        : this(format, statements.Count > 0 ? statements[0] : BankStatement.Empty)
+    {
+        Statements = statements;
+    }
+}
 
 /// <summary>
 /// Reading an account statement exported from OTP banka Srbija's Business E-bank.
@@ -74,18 +91,24 @@ public static class OtpStatementReader
     /// </summary>
     public static OtpStatementRead Read(string? content)
     {
-        if (string.IsNullOrWhiteSpace(content))
-            return new OtpStatementRead(OtpStatementFormat.Unknown, BankStatement.Empty);
+        if (string.IsNullOrWhiteSpace(content)) return NotRecognised;
 
         if (!content.Contains(CamtNamespaceMarker, StringComparison.OrdinalIgnoreCase))
-            return new OtpStatementRead(OtpStatementFormat.Unknown, BankStatement.Empty);
+            return NotRecognised;
 
-        var statement = Camt053Reader.Read(content);
+        // Carries the namespace and still cannot be read — a download cut off halfway, an entry
+        // with no amount. That is not a statement, and it must not come back as a camt file with
+        // nothing in it: "no transactions" is what the host would say, and the person would
+        // believe it.
+        if (!Camt053Reader.TryReadAll(content, out var statements)) return NotRecognised;
 
         // Recognised as camt and still empty: a camt file with no entries is a real thing — a day
         // with no movement — so this stays Camt053 rather than falling back to Unknown. The host
         // can then say "no transactions" instead of "unreadable file", which are different
         // sentences to somebody who has just downloaded it.
-        return new OtpStatementRead(OtpStatementFormat.Camt053, statement);
+        return new OtpStatementRead(OtpStatementFormat.Camt053, statements);
     }
+
+    private static readonly OtpStatementRead NotRecognised =
+        new(OtpStatementFormat.Unknown, Array.Empty<BankStatement>());
 }

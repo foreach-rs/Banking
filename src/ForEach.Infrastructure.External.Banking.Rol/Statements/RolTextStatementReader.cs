@@ -84,6 +84,40 @@ public static class RolTextStatementReader
 
         var statementDate = BankValues.Date(Field(header, 1, 8), DateFormat);
 
+        // Every movement's amounts and date are read before any line is. A column that is not an
+        // amount, or a line with no date of its own on a header with none either, refuses the
+        // file: the alternative is a line booked at zero, or on the first of January 0001, on a
+        // statement that otherwise looks complete.
+        var entries = new List<StatementEntry>();
+
+        foreach (var line in lines.Where(IsDetail))
+        {
+            var debitText = Field(line, 66, 24);
+            var creditText = Field(line, 90, 24);
+
+            var debit = debitText is null ? 0m : Signed(debitText);
+            var credit = creditText is null ? 0m : Signed(creditText);
+
+            if (debit is null || credit is null)
+            {
+                return new RolStatementRead(
+                    RolStatementKind.Dinar, BankStatement.Empty,
+                    $"Iznos „{(debit is null ? debitText : creditText)}” nije čitljiv. "
+                    + "Izvod se ne uvozi.");
+            }
+
+            var date = BankValues.Date(Field(line, 25, 8), DateFormat) ?? statementDate;
+
+            if (date is null)
+            {
+                return new RolStatementRead(
+                    RolStatementKind.Dinar, BankStatement.Empty,
+                    $"Datum „{Field(line, 25, 8)}” nije čitljiv. Izvod se ne uvozi.");
+            }
+
+            entries.Add(ReadEntry(line, debit.Value, credit.Value, date.Value));
+        }
+
         var statement = new BankStatement(
             AccountNumber: Field(header, 9, 20),
             Currency: "RSD",
@@ -91,12 +125,7 @@ public static class RolTextStatementReader
             StatementDate: statementDate,
             OpeningBalance: Signed(Field(header, 72, 24)),
             ClosingBalance: Signed(Field(header, 144, 24)),
-            Entries:
-            [
-                .. lines
-                    .Where(IsDetail)
-                    .Select(line => ReadEntry(line, statementDate))
-            ]);
+            Entries: entries);
 
         return new RolStatementRead(RolStatementKind.Dinar, statement);
     }
@@ -120,11 +149,13 @@ public static class RolTextStatementReader
     public static bool Recognises(string? content) =>
         Read(content).Kind is not RolStatementKind.Unknown;
 
-    private static StatementEntry ReadEntry(string line, DateOnly? statementDate)
+    /// <summary>
+    /// One movement. The two amount columns and the date arrive already read — a blank column is
+    /// the unused side and reads as zero — because a line either fails on refuses the file before
+    /// this is reached.
+    /// </summary>
+    private static StatementEntry ReadEntry(string line, decimal debit, decimal credit, DateOnly date)
     {
-        var debit = Signed(Field(line, 66, 24)) ?? 0m;
-        var credit = Signed(Field(line, 90, 24)) ?? 0m;
-
         // Netted, for the reason the XML reader states: a storno is written as a negative in one
         // of the two columns, and taking whichever is non-zero books a correction as money
         // arriving.
@@ -138,7 +169,7 @@ public static class RolTextStatementReader
             Direction: net < 0 ? StatementDirection.Debit : StatementDirection.Credit,
 
             // A detail record carries the statement's own date rather than a value date of its own.
-            BookingDate: BankValues.Date(Field(line, 25, 8), DateFormat) ?? statementDate ?? default,
+            BookingDate: date,
             ValueDate: null,
 
             // The beneficiary's reference first — poziv_korisnika — which is the same rule and the

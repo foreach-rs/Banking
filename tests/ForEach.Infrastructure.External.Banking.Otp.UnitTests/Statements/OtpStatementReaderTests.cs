@@ -58,6 +58,43 @@ public class OtpStatementReaderTests
         Assert.False(read.Statement.Reconciles);
     }
 
+    [Fact]
+    public void A_truncated_camt_download_is_unreadable_and_not_a_quiet_day()
+    {
+        // Half a file carries the namespace and parses as nothing. Reported as Camt053 with no
+        // entries it reads as "no transactions today", and somebody believes it.
+        var half = Camt()[..(Camt().Length / 2)];
+
+        var read = OtpStatementReader.Read(half);
+
+        Assert.Equal(OtpStatementFormat.Unknown, read.Format);
+        Assert.Empty(read.Statement.Entries);
+        Assert.Empty(read.Statements);
+    }
+
+    [Fact]
+    public void A_file_holding_several_statements_exposes_all_of_them()
+    {
+        var two = Camt().Replace(
+            "</BkToCstmrStmt>", Second + "</BkToCstmrStmt>", StringComparison.Ordinal);
+
+        var read = OtpStatementReader.Read(two);
+
+        Assert.Equal(OtpStatementFormat.Camt053, read.Format);
+        Assert.Equal(2, read.Statements.Count);
+        Assert.Equal(["143", "144"], read.Statements.Select(statement => statement.Number));
+
+        // The single-statement property is the first of the list, not a different read.
+        Assert.Same(read.Statements[0], read.Statement);
+    }
+
+    private const string Second = """
+        <Stmt>
+          <LglSeqNb>144</LglSeqNb>
+          <Acct><Id><Othr><Id>325-9500700194223-11</Id></Othr></Id><Ccy>RSD</Ccy></Acct>
+        </Stmt>
+        """;
+
     private static string Camt(bool withEntry = true, string closing = "370000.00") =>
         $"""
         <?xml version="1.0" encoding="UTF-8"?>

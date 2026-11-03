@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using ForEach.Infrastructure.External.Banking.Formats;
 using ForEach.Infrastructure.External.Banking.Payments;
 
 namespace ForEach.Infrastructure.External.Banking.Halcom.Payments;
@@ -234,6 +235,21 @@ public static class HalcomPaymentOrderWriter
         Representable(order.OrderingName, "Naziv nalogodavca");
         Representable(order.OrderingPlace, "Mesto nalogodavca");
 
+        // A control character is representable in the code page and still ruins the file: a line
+        // break inside a purpose ends the record there and starts a new one with the rest, so the
+        // bank reads four records where the summary promised three.
+        Clean(order.BeneficiaryName, "Naziv korisnika");
+        Clean(order.BeneficiaryPlace, "Mesto korisnika");
+        Clean(order.BeneficiaryAddress, "Adresa korisnika");
+        Clean(order.Purpose, "Svrha plaćanja");
+        Clean(order.OrderingName, "Naziv nalogodavca");
+        Clean(order.OrderingPlace, "Mesto nalogodavca");
+        Clean(order.DebitReference, "Poziv na broj zaduženja");
+        Clean(order.CreditReference, "Poziv na broj odobrenja");
+        Clean(order.DebitReferenceModel, "Model zaduženja");
+        Clean(order.CreditReferenceModel, "Model odobrenja");
+        Clean(order.PurposeCode, "Šifra plaćanja");
+
         return refusals;
 
         void Account(string value, string label)
@@ -284,6 +300,12 @@ public static class HalcomPaymentOrderWriter
                     $"{where}{label} sadrži znak „{c}” koji se ne može zapisati u Windows-1250 "
                     + "kodnoj strani koju banka očekuje.");
             }
+        }
+
+        void Clean(string? value, string label)
+        {
+            if (BankValues.FirstControlCharacter(value) is { } c)
+                refusals.Add($"{where}{label} sadrži nedozvoljen kontrolni znak (U+{(int)c:X4}).");
         }
     }
 

@@ -24,10 +24,17 @@ public enum RolStatementKind
 /// empty statement otherwise.
 /// </param>
 /// <param name="Statement">
-/// What was read, or <see cref="BankStatement.Empty"/> when nothing recognised the file. ROL
-/// writes one statement per file, so there is no list here.
+/// What was read, or <see cref="BankStatement.Empty"/> when nothing recognised the file — or when
+/// it was recognised and refused. ROL writes one statement per file, so there is no list here.
 /// </param>
-public sealed record RolStatementRead(RolStatementKind Kind, BankStatement Statement);
+/// <param name="Refusal">
+/// Why a recognised file was not read, in Serbian: an amount that is not a number, a date that
+/// does not parse. Null when the file was read, or when nothing recognised it.
+/// </param>
+public sealed record RolStatementRead(
+    RolStatementKind Kind,
+    BankStatement Statement,
+    string? Refusal = null);
 
 /// <summary>
 /// Reads a ROL (Raiffeisen OnLine) XML account statement — the format Raiffeisen and OTP both
@@ -79,6 +86,26 @@ public static class RolStatementReader
 
         var statementDate = BankValues.Date(Attribute(header, "DatumIzvoda"), BankValues.SerbianDate);
 
+        var lines = root.Elements()
+            .Where(element => element.Name.LocalName == "Stavke")
+            .ToList();
+
+        // Every amount is read before any line is. "100,00" in a column that writes "100.00" is
+        // not zero, and a line booked at zero — in the credit direction — on a statement that
+        // otherwise looks complete is the quiet failure this reader exists to avoid.
+        foreach (var stavka in lines)
+        {
+            foreach (var column in new[] { "Duguje", "Potrazuje" })
+            {
+                if (Attribute(stavka, column) is { } text && BankValues.Amount(text) is null)
+                {
+                    return new RolStatementRead(
+                        kind, BankStatement.Empty,
+                        $"Iznos „{text}” u koloni {column} nije čitljiv. Izvod se ne uvozi.");
+                }
+            }
+        }
+
         var statement = new BankStatement(
             // The Partija is the 18-digit domestic account. On a devizni statement it is a
             // substring of the IBAN, so an account recorded either way still matches.
@@ -95,12 +122,7 @@ public static class RolStatementReader
             StatementDate: statementDate,
             OpeningBalance: BankValues.Amount(Attribute(header, "PrethodnoStanje")),
             ClosingBalance: BankValues.Amount(Attribute(header, "NovoStanje")),
-            Entries:
-            [
-                .. root.Elements()
-                    .Where(element => element.Name.LocalName == "Stavke")
-                    .Select(stavka => ReadEntry(stavka, statementDate, kind))
-            ]);
+            Entries: [.. lines.Select(stavka => ReadEntry(stavka, statementDate, kind))]);
 
         return new RolStatementRead(kind, statement);
     }
@@ -109,7 +131,8 @@ public static class RolStatementReader
         XElement stavka, DateOnly? statementDate, RolStatementKind kind)
     {
         // Two columns rather than an indicator, which is the format's own shape: a line states what
-        // it owes in one and what it credits in the other, and the unused one is "0".
+        // it owes in one and what it credits in the other, and the unused one is "0". Unreadable
+        // was refused above; absent is the unused side.
         var debit = BankValues.Amount(Attribute(stavka, "Duguje")) ?? 0m;
         var credit = BankValues.Amount(Attribute(stavka, "Potrazuje")) ?? 0m;
 

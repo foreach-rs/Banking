@@ -314,7 +314,35 @@ public static class RolForeignPaymentOrderWriter
 
         Statistics();
 
+        // XML cannot carry most control characters at all — the writer throws on U+0001 rather
+        // than escaping it — and a line break inside the payment details is one the bank's
+        // confirmation prints as two. Refused by field, so the person fixing it knows which one.
+        Clean(order.OrderingRegistrationNumber, "Matični broj nalogodavca");
+        Clean(order.OrderingAccount, "Partija");
+        Clean(order.OrderingPlace, "Mesto");
+        Clean(order.OwnReference, "Broj naloga");
+        Clean(order.BeneficiaryName, "Naziv korisnika");
+        Clean(order.BeneficiaryAddress, "Adresa korisnika");
+        Clean(order.BeneficiaryPlace, "Mesto korisnika");
+        Clean(order.BeneficiaryCountryCode, "Šifra zemlje korisnika");
+        Clean(order.BeneficiaryAccount, "Račun korisnika");
+        Clean(order.BeneficiaryContact, "Kontakt korisnika");
+        Clean(order.BeneficiaryBankSwift, "SWIFT adresa banke korisnika");
+        Clean(order.BeneficiaryBankName, "Banka korisnika");
+        Clean(order.BeneficiaryBankContact, "Kontakt banke korisnika");
+        Clean(order.IntermediaryBankSwift, "SWIFT adresa posredničke banke");
+        Clean(order.IntermediaryBankName, "Posrednička banka");
+        Clean(order.IntermediaryBankAccount, "Račun banke korisnika kod posredničke banke");
+        Clean(order.Details, "Detalji plaćanja");
+        Clean(order.CurrencyCode, "Šifra valute");
+
         return refusals;
+
+        void Clean(string? value, string label)
+        {
+            if (BankValues.FirstControlCharacter(value) is { } c)
+                refusals.Add($"{where}{label} sadrži nedozvoljen kontrolni znak (U+{(int)c:X4}).");
+        }
 
         void Statistics()
         {
@@ -354,6 +382,17 @@ public static class RolForeignPaymentOrderWriter
                 if (item.Amount <= 0) refusals.Add($"{at}Iznos stavke mora biti veći od nule.");
                 else if (decimal.Round(item.Amount, 2) != item.Amount)
                     refusals.Add($"{at}Iznos stavke ima više od dve decimale.");
+
+                foreach (var (value, label) in new[]
+                         {
+                             (item.ReasonCode, "Šifra osnova plaćanja"),
+                             (item.ContractNumber, "Broj ugovora"),
+                             (item.Description, "Opis transakcije")
+                         })
+                {
+                    if (BankValues.FirstControlCharacter(value) is { } c)
+                        refusals.Add($"{at}{label} sadrži nedozvoljen kontrolni znak (U+{(int)c:X4}).");
+                }
             }
 
             // Inferred rather than quoted — see the class summary. The statistics are how the

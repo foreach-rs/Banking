@@ -160,6 +160,22 @@ public class RolPaymentOrderWriterTests
     }
 
     [Fact]
+    public void A_control_character_in_a_field_is_refused_by_name_rather_than_thrown()
+    {
+        // The XML writer throws on U+0001 rather than escaping it, and a line break inside a
+        // purpose is one the bank's confirmation prints as two.
+        var broken = RolPaymentOrderWriter.Write(Order() with { Purpose = "Plaćanje\r\nfakture" });
+
+        Assert.False(broken.Written);
+        Assert.Contains(broken.Refusals, refusal => refusal.Contains("Svrha doznake", StringComparison.Ordinal));
+
+        var control = RolPaymentOrderWriter.Write(Order() with { BeneficiaryName = "ALFA\u0001DOO" });
+
+        Assert.False(control.Written);
+        Assert.Contains(control.Refusals, refusal => refusal.Contains("Naziv korisnika", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_model_with_no_reference_is_refused()
     {
         // The bank validates the control digits of a 97 reference, and there is nothing to

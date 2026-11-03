@@ -241,7 +241,29 @@ public static class RolPaymentOrderWriter
         if (order.ValueDateUntil is { } until && until < order.ValueDate)
             refusals.Add($"{where}Datum valute do je pre datuma valute.");
 
+        // XML cannot carry most control characters at all — the writer throws on U+0001 rather
+        // than escaping it — and a line break inside a purpose is one the bank's confirmation
+        // prints as two. Refused by field, so the person fixing it knows which one.
+        Clean(order.OrderingRegistrationNumber, "Matični broj nalogodavca");
+        Clean(order.OrderingName, "Naziv nalogodavca");
+        Clean(order.OrderingPlace, "Mesto nalogodavca");
+        Clean(order.BeneficiaryName, "Naziv korisnika");
+        Clean(order.BeneficiaryPlace, "Mesto korisnika");
+        Clean(order.Purpose, "Svrha doznake");
+        Clean(order.PurposeCode, "Šifra plaćanja");
+        Clean(order.OwnReference, "Vaš broj naloga");
+        Clean(order.DebitReferenceModel, "Model zaduženja");
+        Clean(order.DebitReference, "Poziv na broj zaduženja");
+        Clean(order.CreditReferenceModel, "Model odobrenja");
+        Clean(order.CreditReference, "Poziv na broj odobrenja");
+
         return refusals;
+
+        void Clean(string? value, string label)
+        {
+            if (BankValues.FirstControlCharacter(value) is { } c)
+                refusals.Add($"{where}{label} sadrži nedozvoljen kontrolni znak (U+{(int)c:X4}).");
+        }
 
         void Account(string value, string label)
         {

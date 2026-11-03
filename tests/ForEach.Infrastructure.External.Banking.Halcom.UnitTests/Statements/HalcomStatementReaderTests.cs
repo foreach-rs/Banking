@@ -214,6 +214,18 @@ public class HalcomStatementReaderTests
     }
 
     [Fact]
+    public void An_amount_that_is_not_digits_refuses_the_file_rather_than_booking_zero()
+    {
+        // A line booked at zero — in the credit direction — on a statement that otherwise looks
+        // complete is the quiet failure. The file is refused, naming the figure.
+        var read = HalcomStatementReader.Read(Line(amount: "000000000000abc"));
+
+        Assert.Equal(HalcomStatementKind.FixedWidth, read.Kind);
+        Assert.Empty(read.Statements);
+        Assert.Contains("abc", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void The_DOS_end_of_file_marker_is_tolerated_whether_present_or_not()
     {
         // The spec mandates it; no real file carries it.
@@ -315,6 +327,45 @@ public class HalcomStatementReaderTests
         Assert.NotNull(read.Refusal);
     }
 
+    [Fact]
+    public void Two_movements_sharing_one_balance_record_refuse_the_file()
+    {
+        // One KONTO carries one before/after pair, which says which way the *net* went. Two
+        // movements of 100 and 30 against 100 → 170 are not two credits — one of them could be a
+        // debit of 30 against a credit of 100 — and booking both with the net direction is a
+        // payment out recorded as money in.
+        var read = HalcomStatementReader.Read(
+            "<CLIENTPROFILE><C_AI>X</C_AI></CLIENTPROFILE>"
+            + "<KONTO><K_GI>1</K_GI><STK>ACC</STK><OV>EUR</OV><AMM>100,00</AMM><PST>170,00</PST></KONTO>"
+            + "<PPTPROMET><P_GI>1</P_GI><VBD>100,00</VBD><DOB>03.11.2026</DOB></PPTPROMET>"
+            + "<PPTPROMET><P_GI>1</P_GI><VBD>30,00</VBD><DOB>03.11.2026</DOB></PPTPROMET>");
+
+        Assert.Equal(HalcomStatementKind.ForeignStatement, read.Kind);
+        Assert.Empty(read.Statements);
+        Assert.Contains("KONTO", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_large_file_that_never_closes_its_tags_is_answered_in_milliseconds()
+    {
+        // Half a megabyte of openers and no closers. A lazy pattern with a backreference is
+        // quadratic on this and timed out after two seconds; a scan answers "no movements".
+        var content = new System.Text.StringBuilder("<CLIENTPROFILE>");
+
+        for (var i = 0; i < 60_000; i++) content.Append("<KONTO>x");
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        var read = HalcomStatementReader.Read(content.ToString());
+
+        clock.Stop();
+
+        Assert.Equal(HalcomStatementKind.ForeignStatement, read.Kind);
+        Assert.Empty(read.Statements);
+        Assert.NotNull(read.Refusal);
+        Assert.True(clock.ElapsedMilliseconds < 1_000, $"took {clock.ElapsedMilliseconds} ms");
+    }
+
     /// <summary>
     /// A real Halcom devizni export, trimmed to the three records that matter: the client profile,
     /// the running balance and the movement it belongs to, joined by <c>K_GI</c> / <c>P_GI</c>.
@@ -386,6 +437,26 @@ public class HalcomStatementReaderTests
 
         Assert.Empty(read.Statements);
         Assert.Contains("ZNESEK_V_BREME", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("1234.50")]
+    [InlineData("1,234.56")]
+    [InlineData("1 234,50")]
+    [InlineData("abc")]
+    public void An_amount_not_in_display_form_refuses_the_file_rather_than_being_reinterpreted(string amount)
+    {
+        // "1234.50" with the dots stripped is 123450 — a hundredfold error on a figure that was
+        // merely written the English way. Nothing is guessed at: the file is refused and the
+        // figure named.
+        var read = HalcomStatementReader.Read(
+            "ST_RACUNA#ST_IZPISKA#DATUM_KNJ#ZNESEK_V_BREME#ZNESEK_V_DOBRO\r\n"
+            + "205000000010804045#12#16.04.2026#0,00#1.000,00\r\n"
+            + $"205000000010804045#12#16.04.2026#0,00#{amount}");
+
+        Assert.Equal(HalcomStatementKind.Extended, read.Kind);
+        Assert.Empty(read.Statements);
+        Assert.Contains(amount, read.Refusal!, StringComparison.Ordinal);
     }
 
     [Fact]

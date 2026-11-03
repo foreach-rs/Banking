@@ -83,8 +83,11 @@ public static class BankValues
     /// An amount in Serbian display form: <c>3.000.000,00</c> → 3000000.00.
     ///
     /// Used by the Halcom extended export, which writes amounts the way they appear on a screen
-    /// rather than the way a machine reads them. The dots are stripped before the comma becomes a
-    /// point, so the two separators cannot be confused for each other.
+    /// rather than the way a machine reads them. The comma is the decimal separator and a dot may
+    /// only group thousands — exactly three digits behind each one. Anything else is refused rather
+    /// than reinterpreted: stripping the dots blindly reads <c>1234.50</c> as 123450, a hundredfold
+    /// error on a figure that was merely written the English way, and <c>1,234.56</c> would be
+    /// taken apart at the wrong separator.
     /// </summary>
     public static decimal? DisplayAmount(string? text)
     {
@@ -92,7 +95,58 @@ public static class BankValues
 
         if (string.IsNullOrEmpty(trimmed)) return null;
 
-        return Amount(trimmed.Replace(".", string.Empty, StringComparison.Ordinal).Replace(',', '.'));
+        var comma = trimmed.IndexOf(',', StringComparison.Ordinal);
+
+        // One comma at most, and nothing but digits behind it: a dot after the comma is the
+        // English form, and a second comma is nothing at all.
+        if (comma >= 0 && trimmed.IndexOf(',', comma + 1) >= 0) return null;
+
+        var whole = comma < 0 ? trimmed : trimmed[..comma];
+        var fraction = comma < 0 ? string.Empty : trimmed[(comma + 1)..];
+
+        if (!fraction.All(char.IsAsciiDigit)) return null;
+
+        var negative = whole.StartsWith('-');
+
+        if (negative || whole.StartsWith('+')) whole = whole[1..];
+
+        var groups = whole.Split('.');
+
+        if (groups.Any(group => group.Length == 0 || !group.All(char.IsAsciiDigit))) return null;
+
+        // A dot groups thousands and nothing else, so every group behind one is three digits and
+        // the one in front is at most three. "1234.50" fails here instead of becoming 123450.
+        if (groups.Length > 1
+            && (groups[0].Length > 3 || groups.Skip(1).Any(group => group.Length != 3)))
+        {
+            return null;
+        }
+
+        return Amount(
+            (negative ? "-" : string.Empty)
+            + string.Concat(groups)
+            + (fraction.Length > 0 ? "." + fraction : string.Empty));
+    }
+
+    /// <summary>
+    /// The first control character in a text, or null when there is none.
+    ///
+    /// Every writer here refuses a field carrying one, and for the same reason in each format: a
+    /// line break inside a fixed-width record moves every field after it onto a record of its own,
+    /// an XML writer throws on <c>U+0001</c> rather than escaping it, and a tab in a name is a
+    /// character nobody typed on purpose. Refusing at the field names what to fix; a file written
+    /// around it is a payment the bank reads differently from the person who prepared it.
+    /// </summary>
+    public static char? FirstControlCharacter(string? text)
+    {
+        if (text is null) return null;
+
+        foreach (var c in text)
+        {
+            if (char.IsControl(c)) return c;
+        }
+
+        return null;
     }
 
     /// <summary>

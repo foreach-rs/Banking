@@ -125,6 +125,57 @@ public class AssecoTextStatementReaderTests
     }
 
     [Fact]
+    public void An_amount_that_is_not_digits_refuses_the_file_rather_than_booking_zero()
+    {
+        var broken = string.Join(
+            Environment.NewLine,
+            Header(),
+            Detail(
+                counterpartyAccount: "160000000012345678",
+                name: "KUPAC DOO",
+                purpose: "UPLATA PO FAKTURI",
+                paymentCode: "221",
+                amount: "0000000000abc",
+                direction: 'P',
+                reference: "2026-114",
+                reklamacija: "11310622300001"));
+
+        var read = AssecoTextStatementReader.Read(broken);
+
+        Assert.Empty(read.Statements);
+        Assert.Contains("abc", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_line_whose_date_does_not_parse_refuses_the_file_rather_than_defaulting()
+    {
+        var lines = Sample.Split("\r\n");
+
+        lines[1] = lines[1].Remove(188, 8).Insert(188, "99999999");
+
+        var read = AssecoTextStatementReader.Read(string.Join("\r\n", lines));
+
+        Assert.Empty(read.Statements);
+        Assert.Contains("99999999", read.Refusal!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_blank_balance_is_absent_rather_than_zero()
+    {
+        // Zero would claim the account was empty, and Reconciles would then report a fault
+        // nobody can find. Null says nothing, which is what a blank field says.
+        var lines = Sample.Split("\r\n");
+
+        lines[0] = lines[0].Remove(33, 18).Insert(33, new string(' ', 18));
+
+        var statement = AssecoTextStatementReader.Read(string.Join("\r\n", lines)).Statement;
+
+        Assert.Null(statement.OpeningBalance);
+        Assert.Null(statement.Reconciles);
+        Assert.Equal(2, statement.Entries.Count);
+    }
+
+    [Fact]
     public void Trailing_spaces_cannot_be_lost_because_the_kind_marker_is_the_last_character()
     {
         var trimmed = string.Join(

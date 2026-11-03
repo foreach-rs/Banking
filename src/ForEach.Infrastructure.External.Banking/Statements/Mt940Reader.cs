@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using ForEach.Infrastructure.External.Banking.Formats;
 
@@ -57,6 +58,11 @@ public static class Mt940Reader
     /// <summary>
     /// Every statement in the file. One MT940 file routinely holds several — a bank sending a
     /// week at once, or one izvod per account — each opening with its own <c>:20:</c>.
+    ///
+    /// A statement split over several messages comes back as one: <c>:28C:</c> carries the izvod
+    /// number and the sequence within it, and a message whose sequence continues the one before
+    /// it on the same account is the same izvod, not the next. It opens with the first message's
+    /// balance, closes with the last one's, and holds every entry in between.
     /// </summary>
     public static IReadOnlyList<BankStatement> ReadAll(string? content)
     {
@@ -66,28 +72,99 @@ public static class Mt940Reader
 
         if (fields.Count == 0) return [];
 
-        var statements = new List<BankStatement>();
+        var messages = new List<List<(string Tag, string Value)>>();
         var current = new List<(string Tag, string Value)>();
 
         foreach (var field in fields)
         {
-            // :20: opens a statement. Anything before the first one is not part of any.
+            // :20: opens a message. Anything before the first one is not part of any.
             if (field.Tag is "20" && current.Count > 0)
             {
-                statements.Add(Statement(current));
+                messages.Add(current);
                 current = [];
             }
 
             current.Add(field);
         }
 
-        if (current.Count > 0) statements.Add(Statement(current));
+        if (current.Count > 0) messages.Add(current);
 
-        // A file of fields that produced nothing recognisable is not an MT940 file. Reported as no
-        // statements rather than as one empty one, so the host can say "this is not a statement"
-        // instead of "the bank had a quiet day".
-        return [.. statements.Where(statement => statement.AccountNumber is not null)];
+        var statements = new List<BankStatement>();
+
+        (string? Number, int? Sequence) previous = (null, null);
+
+        foreach (var message in messages)
+        {
+            var statement = Statement(message);
+
+            // A file of fields that produced nothing recognisable is not an MT940 file. Dropped
+            // rather than kept as an empty statement, so the host can say "this is not a
+            // statement" instead of "the bank had a quiet day".
+            if (statement.AccountNumber is null) continue;
+
+            var sequence = Sequence(message);
+
+            // The same izvod continues when the number is the same, the account is the same and
+            // the sequence moves on. The same number with the same sequence is a repeat — the
+            // same file pasted twice — and stays a statement of its own.
+            var continues = statements.Count > 0
+                            && statement.Number is not null
+                            && statement.Number == previous.Number
+                            && statement.AccountNumber == statements[^1].AccountNumber
+                            && sequence is { } next
+                            && previous.Sequence is { } last
+                            && next > last;
+
+            if (continues)
+            {
+                statements[^1] = Merged(statements[^1], statement);
+            }
+            else
+            {
+                statements.Add(statement);
+            }
+
+            previous = (statement.Number, sequence);
+        }
+
+        return statements;
     }
+
+    /// <summary>
+    /// The sequence within the izvod — the part of <c>:28C:</c> after the slash. Null where the
+    /// message states none, which is then never a continuation.
+    /// </summary>
+    private static int? Sequence(List<(string Tag, string Value)> message)
+    {
+        foreach (var (tag, value) in message)
+        {
+            if (tag is not ("28C" or "28")) continue;
+
+            var parts = value.Split('/');
+
+            if (parts.Length < 2) return null;
+
+            return int.TryParse(
+                parts[1].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out var sequence)
+                ? sequence
+                : null;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The first message's statement with the next one folded in: the opening balance stays the
+    /// first's, the closing balance and date move to the last's, and the entries run on.
+    /// </summary>
+    private static BankStatement Merged(BankStatement first, BankStatement next) =>
+        first with
+        {
+            ClosingBalance = next.ClosingBalance ?? first.ClosingBalance,
+            StatementDate = next.StatementDate ?? first.StatementDate,
+            Currency = first.Currency.Length > 0 ? first.Currency : next.Currency,
+            Entries = [.. first.Entries, .. next.Entries]
+        };
 
     /// <summary>
     /// Whether the text looks like MT940 at all.
@@ -427,8 +504,22 @@ public static class Mt940Reader
                 continue;
             }
 
-            // A continuation, or the "-}" trailer some senders append. Kept with a newline so
-            // field 86's line-per-subfield dialect survives.
+            // The SWIFT framing between messages: "-}" closes block 4 and "{1:…}{2:…}{4:" opens
+            // the next. Neither is part of any field, and glued onto the previous one they put
+            // "-}" behind the closing balance — the last field of a message — so it fails to parse
+            // on exactly the files that carry the framing.
+            if (trimmed.StartsWith("-}", StringComparison.Ordinal) || trimmed.StartsWith('{'))
+            {
+                if (tag is not null) fields.Add((tag, value.ToString()));
+
+                tag = null;
+                value.Clear();
+
+                continue;
+            }
+
+            // A continuation line. Kept with a newline so field 86's line-per-subfield dialect
+            // survives.
             if (tag is null) continue;
 
             value.Append('\n').Append(trimmed);

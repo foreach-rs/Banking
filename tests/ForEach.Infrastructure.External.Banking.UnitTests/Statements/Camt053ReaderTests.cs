@@ -161,7 +161,84 @@ public class Camt053ReaderTests
         Assert.Equal("144", statements[1].Number);
     }
 
+    [Fact]
+    public void On_a_debit_the_counterparty_is_the_creditor_even_when_the_bank_names_us_as_debtor()
+    {
+        // Some banks name both parties on every entry. On a payment out we are the Dbtr, and a
+        // reader taking "the debtor, else the creditor" hands back our own account as the
+        // counterparty of every supplier payment — which matches no contact and looks like a
+        // transfer to ourselves.
+        var entry = Assert.Single(Camt053Reader.Read(DebitNamingBothParties).Entries);
+
+        Assert.Equal(StatementDirection.Debit, entry.Direction);
+        Assert.Equal("DOBAVLJAČ DOO", entry.CounterpartyName);
+        Assert.Equal("RS35205000000000000099", entry.CounterpartyAccount);
+    }
+
+    [Fact]
+    public void An_amount_that_is_not_a_number_refuses_the_whole_file()
+    {
+        // The alternative is a line booked at zero, in the credit direction, on a statement that
+        // still looks complete — and TryReadAll is how a host tells that from a quiet day.
+        var broken = Sample().Replace(
+            "<Amt Ccy=\"RSD\">120000.00</Amt>", "<Amt Ccy=\"RSD\">abc</Amt>", StringComparison.Ordinal);
+
+        Assert.Empty(Camt053Reader.ReadAll(broken));
+        Assert.Empty(Camt053Reader.Read(broken).Entries);
+
+        Assert.False(Camt053Reader.TryReadAll(broken, out var statements));
+        Assert.Empty(statements);
+    }
+
+    [Fact]
+    public void TryReadAll_tells_an_unreadable_file_from_a_quiet_day()
+    {
+        Assert.False(Camt053Reader.TryReadAll(Sample()[..(Sample().Length / 2)], out _));
+        Assert.False(Camt053Reader.TryReadAll("not xml", out _));
+
+        Assert.True(Camt053Reader.TryReadAll(Sample(), out var statements));
+        Assert.Single(statements);
+    }
+
+    [Fact]
+    public void A_document_type_declaration_is_refused()
+    {
+        // No bank writes one. An entity declaration in an uploaded file is a broken export at
+        // best and an attempt to read the server's filesystem at worst, so it is refused outright
+        // like every other XML reader here does.
+        var withDoctype = Sample().Replace(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<?xml version=\"1.0\"?><!DOCTYPE Document [<!ENTITY x SYSTEM \"file:///etc/passwd\">]>",
+            StringComparison.Ordinal);
+
+        Assert.Empty(Camt053Reader.ReadAll(withDoctype));
+        Assert.False(Camt053Reader.TryReadAll(withDoctype, out _));
+    }
+
     // ---- the file --------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A payment out, on which the bank names both sides: us as the debtor and the supplier as
+    /// the creditor.
+    /// </summary>
+    private const string DebitNamingBothParties = """
+        <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+          <BkToCstmrStmt><Stmt>
+            <Acct><Id><IBAN>RS35160000000000000001</IBAN></Id><Ccy>RSD</Ccy></Acct>
+            <Ntry>
+              <Amt Ccy="RSD">100.00</Amt>
+              <CdtDbtInd>DBIT</CdtDbtInd>
+              <BookgDt><Dt>2026-11-03</Dt></BookgDt>
+              <NtryDtls><TxDtls><RltdPties>
+                <Dbtr><Nm>NAŠA FIRMA DOO</Nm></Dbtr>
+                <DbtrAcct><Id><IBAN>RS35160000000000000001</IBAN></Id></DbtrAcct>
+                <Cdtr><Nm>DOBAVLJAČ DOO</Nm></Cdtr>
+                <CdtrAcct><Id><IBAN>RS35205000000000000099</IBAN></Id></CdtrAcct>
+              </RltdPties></TxDtls></NtryDtls>
+            </Ntry>
+          </Stmt></BkToCstmrStmt>
+        </Document>
+        """;
 
     /// <summary>
     /// A statement in the shape a Serbian bank sends: a domestic account number under Othr rather
