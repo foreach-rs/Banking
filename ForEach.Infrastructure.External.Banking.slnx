@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ForEach.Infrastructure.External.Banking/ForEach.Infrastructure.External.Banking.csproj" />
+    <Project Path="src/ForEach.Infrastructure.External.Banking.Asseco/ForEach.Infrastructure.External.Banking.Asseco.csproj" />
+    <Project Path="src/ForEach.Infrastructure.External.Banking.Halcom/ForEach.Infrastructure.External.Banking.Halcom.csproj" />
+    <Project Path="src/ForEach.Infrastructure.External.Banking.Rol/ForEach.Infrastructure.External.Banking.Rol.csproj" />
+    <Project Path="src/ForEach.Infrastructure.External.Banking.Otp/ForEach.Infrastructure.External.Banking.Otp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ForEach.Infrastructure.External.Banking.UnitTests/ForEach.Infrastructure.External.Banking.UnitTests.csproj" />
+    <Project Path="tests/ForEach.Infrastructure.External.Banking.Asseco.UnitTests/ForEach.Infrastructure.External.Banking.Asseco.UnitTests.csproj" />
+    <Project Path="tests/ForEach.Infrastructure.External.Banking.Halcom.UnitTests/ForEach.Infrastructure.External.Banking.Halcom.UnitTests.csproj" />
+    <Project Path="tests/ForEach.Infrastructure.External.Banking.Rol.UnitTests/ForEach.Infrastructure.External.Banking.Rol.UnitTests.csproj" />
+    <Project Path="tests/ForEach.Infrastructure.External.Banking.Otp.UnitTests/ForEach.Infrastructure.External.Banking.Otp.UnitTests.csproj" />
+  </Folder>
+</Solution>

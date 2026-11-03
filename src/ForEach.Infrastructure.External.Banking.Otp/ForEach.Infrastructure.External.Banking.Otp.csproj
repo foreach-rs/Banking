@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <!-- net8.0 as well as net10.0: nothing here needs anything newer than .NET 8, and a host
+             still on an LTS runtime should not have to upgrade to use it. -->
+        <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <RootNamespace>ForEach.Infrastructure.External.Banking.Otp</RootNamespace>
+
+        <!-- The doc comments are the library's manual; without this file none of them reach a
+             consumer's IntelliSense. A public member without one is a build warning on purpose. -->
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+        <PackageId>ForEach.Infrastructure.External.Banking.Otp</PackageId>
+        <Version>0.1.0</Version>
+        <Description>OTP banka Srbija: account statement import and payment-order export.</Description>
+        <PackageTags>Banking;OTP;BankStatement;Serbia</PackageTags>
+        <PackageProjectUrl>https://github.com/foreach-rs/Banking</PackageProjectUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        <EmbedUntrackedSources>true</EmbedUntrackedSources>
+
+        <!-- Validates that both target frameworks expose the same API. Once a version is
+             published, set <PackageValidationBaselineVersion> to it so a breaking change against
+             the released API fails the build instead of surprising a consumer. -->
+        <EnablePackageValidation>true</EnablePackageValidation>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="README.md" Pack="true" PackagePath="\" />
+    </ItemGroup>
+
+    <!--
+        The one reference, and it is the shared standard rather than a host.
+
+        camt.053 is not OTP's format — it is ISO 20022, and Intesa, Raiffeisen and the rest are
+        moving to the same thing. Copying the reader into each bank's project would be five
+        maintained copies of one specification, and the fifth would drift. What belongs HERE is
+        what only OTP does.
+    -->
+    <ItemGroup>
+        <ProjectReference Include="..\ForEach.Infrastructure.External.Banking\ForEach.Infrastructure.External.Banking.csproj" />
+    </ItemGroup>
+
+</Project>
