@@ -14,7 +14,7 @@
 
         <PackageId>ForEach.Infrastructure.External.Banking.Otp</PackageId>
         <Version>0.1.0</Version>
-        <Description>OTP banka Srbija: account statement import and payment-order export.</Description>
+        <Description>OTP banka Srbija: account statement import.</Description>
         <PackageTags>Banking;OTP;BankStatement;Serbia</PackageTags>
         <PackageProjectUrl>https://github.com/foreach-rs/Banking</PackageProjectUrl>
         <PackageReadmeFile>README.md</PackageReadmeFile>
